@@ -24,8 +24,16 @@ S3_BUCKET = os.environ.get("S3_BUCKET", "wiki-raw-poc")
 S3_PREFIX = os.environ.get("S3_PREFIX", "recentchange")
 DYNAMO_TABLE = os.environ.get("DYNAMO_TABLE", "wiki_producer_checkpoint")
 CHECKPOINT_KEY = os.environ.get("CHECKPOINT_KEY", "recentchange")
-AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
+AWS_REGION = os.environ.get("AWS_REGION", "us-east-2")
 CW_NAMESPACE = os.environ.get("CW_NAMESPACE", "WikiProducer")
+
+# Wikimedia's User-Agent policy requires a descriptive UA identifying the client
+# (and ideally a contact). A generic library UA like "python-requests/x.y" is
+# rejected with HTTP 403. Override CONTACT via env var with a real email/URL.
+USER_AGENT = os.environ.get(
+    "USER_AGENT",
+    "wiki-recentchanges-poc/1.0 (https://github.com/your-org/wiki-poc; chaosbounder@gmail.com)",
+)
 
 FLUSH_INTERVAL_SECS = int(os.environ.get("FLUSH_INTERVAL_SECS", "60"))
 FLUSH_SIZE_BYTES = int(os.environ.get("FLUSH_SIZE_BYTES", str(5 * 1024 * 1024)))  # 5 MB
@@ -140,7 +148,7 @@ def run() -> None:
 
     while True:
         try:
-            headers = {}
+            headers = {"User-Agent": USER_AGENT}
             if last_event_id:
                 headers["Last-Event-ID"] = last_event_id
 

@@ -41,7 +41,7 @@ Note the `ecr_repository_url` output — you'll need it in Step 2.
 cd producer
 
 # Authenticate Docker to ECR
-aws ecr get-login-password --region us-east-1 \
+aws ecr get-login-password --region us-east-2 \
   | docker login --username AWS --password-stdin <ecr_repository_url>
 
 # Build and push
@@ -116,7 +116,7 @@ and row counts climbing.
 | `S3_PREFIX` | `recentchange` | Key prefix inside bucket |
 | `DYNAMO_TABLE` | `wiki_producer_checkpoint` | Checkpoint table name |
 | `CHECKPOINT_KEY` | `recentchange` | Row key in the checkpoint table |
-| `AWS_REGION` | `us-east-1` | AWS region |
+| `AWS_REGION` | `us-east-2` | AWS region |
 | `FLUSH_INTERVAL_SECS` | `60` | Max seconds between S3 flushes |
 | `FLUSH_SIZE_BYTES` | `5242880` | Max buffer size before flush (5 MB) |
 | `BACKOFF_CAP_SECS` | `30` | Max reconnect backoff (seconds) |

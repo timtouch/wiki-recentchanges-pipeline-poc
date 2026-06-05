@@ -19,7 +19,7 @@ provider "aws" {
 variable "aws_region" {
   description = "AWS region for all resources"
   type        = string
-  default     = "us-east-1"
+  default     = "us-east-2"
 }
 
 variable "raw_s3_bucket" {
@@ -37,6 +37,12 @@ variable "image_tag" {
   description = "ECR image tag to deploy (e.g. latest or a git SHA)"
   type        = string
   default     = "latest"
+}
+
+variable "user_agent" {
+  description = "User-Agent sent to Wikimedia. Must be descriptive with contact info per their policy."
+  type        = string
+  default     = "wiki-recentchanges-poc/1.0 (chaosbounder@gmail.com)"
 }
 
 # ---------------------------------------------------------------------------
@@ -207,6 +213,7 @@ resource "aws_ecs_task_definition" "producer" {
       { name = "AWS_REGION",           value = var.aws_region },
       { name = "FLUSH_INTERVAL_SECS",  value = "60" },
       { name = "FLUSH_SIZE_BYTES",     value = "5242880" },
+      { name = "USER_AGENT",           value = var.user_agent },
     ]
 
     logConfiguration = {
@@ -266,11 +273,6 @@ resource "aws_ecs_service" "producer" {
     subnets          = data.aws_subnets.default.ids
     security_groups  = [aws_security_group.producer.id]
     assign_public_ip = true  # needed to reach Wikimedia + AWS APIs from default VPC
-  }
-
-  # Ignore task_definition changes so re-deploys don't require terraform apply
-  lifecycle {
-    ignore_changes = [task_definition]
   }
 }
 
