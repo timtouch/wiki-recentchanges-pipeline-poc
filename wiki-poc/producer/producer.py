@@ -1,0 +1,209 @@
+"""
+Wikimedia Recent Changes SSE Producer
+Consumes the Wikimedia SSE stream and writes JSONL files to S3,
+with DynamoDB checkpointing for resumable delivery.
+"""
+
+import io
+import json
+import logging
+import os
+import time
+import uuid
+from datetime import datetime, timezone
+
+import boto3
+import requests
+from sseclient import SSEClient
+
+# ---------------------------------------------------------------------------
+# Configuration (all overridable via environment variables)
+# ---------------------------------------------------------------------------
+SSE_URL = os.environ.get("SSE_URL", "https://stream.wikimedia.org/v2/stream/recentchange")
+S3_BUCKET = os.environ.get("S3_BUCKET", "wiki-raw-poc")
+S3_PREFIX = os.environ.get("S3_PREFIX", "recentchange")
+DYNAMO_TABLE = os.environ.get("DYNAMO_TABLE", "wiki_producer_checkpoint")
+CHECKPOINT_KEY = os.environ.get("CHECKPOINT_KEY", "recentchange")
+AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
+CW_NAMESPACE = os.environ.get("CW_NAMESPACE", "WikiProducer")
+
+FLUSH_INTERVAL_SECS = int(os.environ.get("FLUSH_INTERVAL_SECS", "60"))
+FLUSH_SIZE_BYTES = int(os.environ.get("FLUSH_SIZE_BYTES", str(5 * 1024 * 1024)))  # 5 MB
+BACKOFF_CAP_SECS = int(os.environ.get("BACKOFF_CAP_SECS", "30"))
+
+# ---------------------------------------------------------------------------
+# Logging — structured JSON to stdout so CloudWatch can parse it
+# ---------------------------------------------------------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format='{"time":"%(asctime)s","level":"%(levelname)s","msg":"%(message)s"}',
+    datefmt="%Y-%m-%dT%H:%M:%SZ",
+)
+log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# AWS clients
+# ---------------------------------------------------------------------------
+s3 = boto3.client("s3", region_name=AWS_REGION)
+dynamo = boto3.resource("dynamodb", region_name=AWS_REGION)
+cw = boto3.client("cloudwatch", region_name=AWS_REGION)
+checkpoint_table = dynamo.Table(DYNAMO_TABLE)
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint helpers
+# ---------------------------------------------------------------------------
+
+def read_checkpoint() -> str | None:
+    """Return the last persisted Last-Event-ID, or None if no checkpoint exists."""
+    try:
+        resp = checkpoint_table.get_item(Key={"stream_id": CHECKPOINT_KEY})
+        item = resp.get("Item")
+        if item:
+            last_id = item.get("last_event_id")
+            log.info(f"Resuming from checkpoint last_event_id={last_id}")
+            return last_id
+    except Exception as e:
+        log.warning(f"Could not read checkpoint, starting from head: {e}")
+    return None
+
+
+def write_checkpoint(last_event_id: str) -> None:
+    """Persist the last successfully flushed Last-Event-ID to DynamoDB."""
+    try:
+        checkpoint_table.put_item(Item={
+            "stream_id": CHECKPOINT_KEY,
+            "last_event_id": last_event_id,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        })
+    except Exception as e:
+        log.error(f"Failed to write checkpoint: {e}")
+
+
+# ---------------------------------------------------------------------------
+# S3 writer
+# ---------------------------------------------------------------------------
+
+def s3_key(dt: datetime) -> str:
+    """Build the hive-partitioned S3 key for a given UTC datetime."""
+    return (
+        f"{S3_PREFIX}/"
+        f"year={dt.year:04d}/"
+        f"month={dt.month:02d}/"
+        f"day={dt.day:02d}/"
+        f"hour={dt.hour:02d}/"
+        f"events-{uuid.uuid4()}.jsonl"
+    )
+
+
+def flush_to_s3(buffer: list[str], last_event_id: str) -> None:
+    """Write the in-memory buffer to S3 as a JSONL file, then checkpoint."""
+    if not buffer:
+        return
+
+    now = datetime.now(timezone.utc)
+    key = s3_key(now)
+    body = "\n".join(buffer) + "\n"
+    byte_count = len(body.encode("utf-8"))
+
+    try:
+        s3.put_object(Bucket=S3_BUCKET, Key=key, Body=body.encode("utf-8"))
+        log.info(f"Flushed {len(buffer)} events ({byte_count} bytes) to s3://{S3_BUCKET}/{key}")
+        emit_metric("bytes_written_per_minute", byte_count, "Bytes")
+        write_checkpoint(last_event_id)
+    except Exception as e:
+        log.error(f"S3 flush failed: {e}")
+        raise
+
+
+# ---------------------------------------------------------------------------
+# CloudWatch custom metrics
+# ---------------------------------------------------------------------------
+
+def emit_metric(name: str, value: float, unit: str = "Count") -> None:
+    try:
+        cw.put_metric_data(
+            Namespace=CW_NAMESPACE,
+            MetricData=[{"MetricName": name, "Value": value, "Unit": unit}],
+        )
+    except Exception as e:
+        log.warning(f"CloudWatch metric emission failed for {name}: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Main loop
+# ---------------------------------------------------------------------------
+
+def run() -> None:
+    backoff = 1
+    last_event_id = read_checkpoint()
+
+    while True:
+        try:
+            headers = {}
+            if last_event_id:
+                headers["Last-Event-ID"] = last_event_id
+
+            log.info(f"Connecting to SSE stream (Last-Event-ID={last_event_id})")
+            response = requests.get(SSE_URL, headers=headers, stream=True, timeout=60)
+            response.raise_for_status()
+
+            client = SSEClient(response)
+            buffer: list[str] = []
+            buffer_bytes = 0
+            last_flush_time = time.monotonic()
+            last_event_time = time.monotonic()
+            events_since_last_emit = 0
+
+            for event in client.events():
+                if not event.data or event.data.strip() == "":
+                    continue
+
+                # Track liveness
+                last_event_time = time.monotonic()
+                events_since_last_emit += 1
+
+                # Capture last event ID for checkpointing
+                if event.id:
+                    last_event_id = event.id
+
+                buffer.append(event.data)
+                buffer_bytes += len(event.data.encode("utf-8"))
+
+                now = time.monotonic()
+                elapsed = now - last_flush_time
+
+                # Emit events/sec metric every 10 seconds
+                if elapsed >= 10:
+                    rate = events_since_last_emit / elapsed
+                    emit_metric("events_received_per_second", rate, "Count/Second")
+                    emit_metric(
+                        "seconds_since_last_event",
+                        now - last_event_time,
+                        "Seconds",
+                    )
+                    events_since_last_emit = 0
+
+                # Flush on time or size threshold
+                if elapsed >= FLUSH_INTERVAL_SECS or buffer_bytes >= FLUSH_SIZE_BYTES:
+                    flush_to_s3(buffer, last_event_id)
+                    buffer = []
+                    buffer_bytes = 0
+                    last_flush_time = time.monotonic()
+
+            # Stream ended cleanly — flush remainder
+            if buffer:
+                flush_to_s3(buffer, last_event_id)
+
+            # Reset backoff on clean exit
+            backoff = 1
+
+        except Exception as e:
+            log.error(f"Stream error: {e}. Reconnecting in {backoff}s...")
+            emit_metric("seconds_since_last_event", backoff, "Seconds")
+            time.sleep(backoff)
+            backoff = min(backoff * 2, BACKOFF_CAP_SECS)
+
+
+if __name__ == "__main__":
+    run()
