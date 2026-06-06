@@ -45,6 +45,41 @@ variable "user_agent" {
   default     = "wiki-recentchanges-poc/1.0 (chaosbounder@gmail.com)"
 }
 
+variable "raw_retention_days" {
+  description = "Days to retain raw JSONL in the landing bucket before expiry. Raw is only needed for replay into Bronze; a few days is ample safety margin."
+  type        = number
+  default     = 7
+}
+
+# ---------------------------------------------------------------------------
+# S3 lifecycle: expire raw JSONL after a retention window
+#
+# The raw landing zone grows ~5-6 GB/day at the full firehose volume. Once
+# Auto Loader has ingested a file into the Bronze Delta table, the raw JSONL is
+# only useful for replay/reprocessing. Expiring it after raw_retention_days
+# keeps storage flat (~35 GB at 7 days) instead of growing unbounded.
+#
+# NOTE: this targets the raw bucket ONLY. The Delta bucket (wiki-delta-poc) is
+# never expired here — that's your actual table storage.
+# ---------------------------------------------------------------------------
+
+resource "aws_s3_bucket_lifecycle_configuration" "raw_expiry" {
+  bucket = var.raw_s3_bucket
+
+  rule {
+    id     = "expire-raw-jsonl"
+    status = "Enabled"
+
+    filter {
+      prefix = "recentchange/"
+    }
+
+    expiration {
+      days = var.raw_retention_days
+    }
+  }
+}
+
 # ---------------------------------------------------------------------------
 # ECR repository
 # ---------------------------------------------------------------------------
