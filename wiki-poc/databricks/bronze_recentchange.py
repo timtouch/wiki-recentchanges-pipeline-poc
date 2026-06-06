@@ -24,27 +24,29 @@ def recentchange_raw():
     return (
         spark.readStream.format("cloudFiles")
         # --- Auto Loader options ---
-        .option("cloudFiles.format", "json")
+        # Read each JSONL line verbatim as a string. This is the faithful-capture
+        # pattern for Bronze: no JSON parsing, so the original payload is preserved
+        # byte-for-byte and upstream schema drift can never break ingestion.
+        .option("cloudFiles.format", "text")
         # Directory-listing mode: no SNS/SQS needed at POC volume (~2 events/sec)
         .option("cloudFiles.useNotifications", "false")
-        # Don't infer schema — Bronze captures everything faithfully.
-        # Schema drift in the upstream feed should never break ingestion.
-        .option("inferSchema", "false")
-        # Hive-partitioned source path; Auto Loader will discover new
-        # year=/month=/day=/hour= directories automatically.
+        # Pick up files already in the landing zone on first run.
         .option("cloudFiles.includeExistingFiles", "true")
+        # Hive-partitioned source path; Auto Loader discovers new
+        # year=/month=/day=/hour= directories automatically.
         .load(RAW_S3_PATH)
         # --- Columns ---
-        # Store the entire event as raw JSON string for full fidelity.
-        # The actual JSON is what Auto Loader read into a single-column df
-        # when inferSchema=false and the source is JSONL.
         .select(
-            F.to_json(F.struct("*")).alias("raw_json"),
+            # `value` is the single column text format produces — one row per
+            # JSONL line, holding the exact original JSON string the producer wrote.
+            F.col("value").alias("raw_json"),
             F.current_timestamp().alias("ingest_timestamp"),
-            F.input_file_name().alias("source_file"),
-            # Pre-extract event_id now so Silver can dedup without re-parsing everything.
-            # meta.id is the canonical unique event identifier in the recentchange stream.
-            F.get_json_object(F.to_json(F.struct("*")), "$.meta.id").alias("event_id"),
+            # _metadata.file_path is the recommended way to capture source file
+            # with Auto Loader (more reliable than input_file_name()).
+            F.col("_metadata.file_path").alias("source_file"),
+            # Pre-extract event_id from the raw string so Silver can dedup
+            # without re-parsing everything. meta.id is the canonical unique ID.
+            F.get_json_object(F.col("value"), "$.meta.id").alias("event_id"),
             # Derive ingest_date for partitioning — cast to date so partition
             # pruning works cleanly in downstream queries.
             F.current_timestamp().cast("date").alias("ingest_date"),
