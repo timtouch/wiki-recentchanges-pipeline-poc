@@ -38,6 +38,10 @@ USER_AGENT = os.environ.get(
 FLUSH_INTERVAL_SECS = int(os.environ.get("FLUSH_INTERVAL_SECS", "60"))
 FLUSH_SIZE_BYTES = int(os.environ.get("FLUSH_SIZE_BYTES", str(5 * 1024 * 1024)))  # 5 MB
 BACKOFF_CAP_SECS = int(os.environ.get("BACKOFF_CAP_SECS", "30"))
+# How often to publish CloudWatch metrics. One batched PutMetricData call per
+# interval keeps API request volume low (well under the 1M/month free tier).
+# Aligned to 60s to match the stream-stall alarm's 60s period.
+METRIC_INTERVAL_SECS = int(os.environ.get("METRIC_INTERVAL_SECS", "60"))
 
 # ---------------------------------------------------------------------------
 # Logging — structured JSON to stdout so CloudWatch can parse it
@@ -104,10 +108,13 @@ def s3_key(dt: datetime) -> str:
     )
 
 
-def flush_to_s3(buffer: list[str], last_event_id: str) -> None:
-    """Write the in-memory buffer to S3 as a JSONL file, then checkpoint."""
+def flush_to_s3(buffer: list[str], last_event_id: str) -> int:
+    """Write the in-memory buffer to S3 as a JSONL file, then checkpoint.
+
+    Returns the number of bytes written (0 if the buffer was empty).
+    """
     if not buffer:
-        return
+        return 0
 
     now = datetime.now(timezone.utc)
     key = s3_key(now)
@@ -117,8 +124,8 @@ def flush_to_s3(buffer: list[str], last_event_id: str) -> None:
     try:
         s3.put_object(Bucket=S3_BUCKET, Key=key, Body=body.encode("utf-8"))
         log.info(f"Flushed {len(buffer)} events ({byte_count} bytes) to s3://{S3_BUCKET}/{key}")
-        emit_metric("bytes_written_per_minute", byte_count, "Bytes")
         write_checkpoint(last_event_id)
+        return byte_count
     except Exception as e:
         log.error(f"S3 flush failed: {e}")
         raise
@@ -128,14 +135,19 @@ def flush_to_s3(buffer: list[str], last_event_id: str) -> None:
 # CloudWatch custom metrics
 # ---------------------------------------------------------------------------
 
-def emit_metric(name: str, value: float, unit: str = "Count") -> None:
+def emit_metrics_batch(metrics: list[dict]) -> None:
+    """Send multiple metrics in a SINGLE PutMetricData request.
+
+    One API call can carry many MetricData entries, so batching keeps request
+    volume far below the CloudWatch free tier. Each dict is
+    {"MetricName": str, "Value": float, "Unit": str}.
+    """
+    if not metrics:
+        return
     try:
-        cw.put_metric_data(
-            Namespace=CW_NAMESPACE,
-            MetricData=[{"MetricName": name, "Value": value, "Unit": unit}],
-        )
+        cw.put_metric_data(Namespace=CW_NAMESPACE, MetricData=metrics)
     except Exception as e:
-        log.warning(f"CloudWatch metric emission failed for {name}: {e}")
+        log.warning(f"CloudWatch metric emission failed: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -161,7 +173,9 @@ def run() -> None:
             buffer_bytes = 0
             last_flush_time = time.monotonic()
             last_event_time = time.monotonic()
+            last_emit_time = time.monotonic()
             events_since_last_emit = 0
+            bytes_since_last_emit = 0
 
             for event in client.events():
                 if not event.data or event.data.strip() == "":
@@ -179,25 +193,40 @@ def run() -> None:
                 buffer_bytes += len(event.data.encode("utf-8"))
 
                 now = time.monotonic()
-                elapsed = now - last_flush_time
-
-                # Emit events/sec metric every 10 seconds
-                if elapsed >= 10:
-                    rate = events_since_last_emit / elapsed
-                    emit_metric("events_received_per_second", rate, "Count/Second")
-                    emit_metric(
-                        "seconds_since_last_event",
-                        now - last_event_time,
-                        "Seconds",
-                    )
-                    events_since_last_emit = 0
 
                 # Flush on time or size threshold
-                if elapsed >= FLUSH_INTERVAL_SECS or buffer_bytes >= FLUSH_SIZE_BYTES:
-                    flush_to_s3(buffer, last_event_id)
+                if (now - last_flush_time) >= FLUSH_INTERVAL_SECS or buffer_bytes >= FLUSH_SIZE_BYTES:
+                    written = flush_to_s3(buffer, last_event_id)
+                    bytes_since_last_emit += written
                     buffer = []
                     buffer_bytes = 0
                     last_flush_time = time.monotonic()
+
+                # Publish metrics once per METRIC_INTERVAL_SECS in a SINGLE
+                # batched API call. The independent last_emit_time timer ensures
+                # this fires once per interval, NOT on every event.
+                emit_elapsed = now - last_emit_time
+                if emit_elapsed >= METRIC_INTERVAL_SECS:
+                    emit_metrics_batch([
+                        {
+                            "MetricName": "events_received_per_second",
+                            "Value": events_since_last_emit / emit_elapsed,
+                            "Unit": "Count/Second",
+                        },
+                        {
+                            "MetricName": "bytes_written_per_minute",
+                            "Value": bytes_since_last_emit,
+                            "Unit": "Bytes",
+                        },
+                        {
+                            "MetricName": "seconds_since_last_event",
+                            "Value": now - last_event_time,
+                            "Unit": "Seconds",
+                        },
+                    ])
+                    last_emit_time = now
+                    events_since_last_emit = 0
+                    bytes_since_last_emit = 0
 
             # Stream ended cleanly — flush remainder
             if buffer:
@@ -208,7 +237,6 @@ def run() -> None:
 
         except Exception as e:
             log.error(f"Stream error: {e}. Reconnecting in {backoff}s...")
-            emit_metric("seconds_since_last_event", backoff, "Seconds")
             time.sleep(backoff)
             backoff = min(backoff * 2, BACKOFF_CAP_SECS)
 
