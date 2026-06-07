@@ -1,7 +1,7 @@
 # Databricks notebook source
 # Bronze Layer — Raw Ingestion via Auto Loader
 # Delta Live Tables pipeline notebook
-# Target table: wiki_poc.bronze.recentchange_raw
+# Target table: wiki_poc.bronze.bronze_recentchange_raw
 
 import dlt
 from pyspark.sql import functions as F
@@ -10,7 +10,7 @@ RAW_S3_PATH = "s3://wiki-raw-poc/recentchange/"
 
 
 @dlt.table(
-    name="recentchange_raw",
+    name="bronze_recentchange_raw",
     comment="Bronze: raw Wikimedia recentchange events ingested from S3 via Auto Loader.",
     table_properties={
         # Silver will read this table via Change Data Feed
@@ -20,7 +20,7 @@ RAW_S3_PATH = "s3://wiki-raw-poc/recentchange/"
     },
     partition_cols=["ingest_date"],
 )
-def recentchange_raw():
+def bronze_recentchange_raw():
     return (
         spark.readStream.format("cloudFiles")
         # --- Auto Loader options ---

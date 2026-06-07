@@ -8,19 +8,14 @@
 # Add this notebook to the SAME DLT pipeline as bronze_recentchange.py:
 #   Pipelines → <your pipeline> → Settings → Libraries → Add library
 #
-# DLT resolves dlt.read_stream("recentchange") → wiki_poc.bronze.recentchange
-# at runtime; no catalog/schema prefix is needed when tables share a pipeline.
+# All Bronze, Silver, and Gold tables share one pipeline and one schema
+# (e.g. wiki_poc.poc). The layer is encoded in the table name prefix:
+#   bronze_recentchange_raw
+#   silver_recentchange_enwiki
+#   silver_recentchange_quarantine
 #
-# SPLIT-PIPELINE UPGRADE PATH
-# ─────────────────────────────────────────────────────────────────────────────
-# If you later move Silver to its own pipeline, replace the read with:
-#
-#   spark.readStream
-#       .format("delta")
-#       .option("readChangeFeed", "true")
-#       .table("wiki_poc.bronze.recentchange_raw")
-#
-# Bronze already has delta.enableChangeDataFeed=true for exactly this case.
+# dlt.read_stream() resolves table names within the same pipeline at runtime
+# — no catalog/schema prefix needed.
 # =============================================================================
 
 import dlt
@@ -118,7 +113,7 @@ RECENTCHANGE_SCHEMA = StructType([
 @dlt.view(name="silver_recentchange_parsed")
 def _silver_parsed():
     return (
-        dlt.read_stream("recentchange_raw")        # → wiki_poc.bronze.recentchange_raw
+        dlt.read_stream("bronze_recentchange_raw")  # Bronze table in this pipeline
         .select(
             F.from_json(F.col("raw_json"), RECENTCHANGE_SCHEMA).alias("e"),
             # log_params excluded from RECENTCHANGE_SCHEMA (variable structure by log_type).
@@ -198,7 +193,7 @@ _PASS = (
 # STEP 7, Part 2  +  STEP 8 — Silver main table: recentchange_enwiki
 # =============================================================================
 @dlt.table(
-    name="recentchange_enwiki",
+    name="silver_recentchange_enwiki",
     comment=(
         "Filtered, deduped, conformed stream of human enwiki edits and "
         "new-page events.  One row per unique event_id (deduplicated within a "
@@ -245,7 +240,7 @@ def silver_enwiki():
 # STEP 7, Part 2 — Quarantine table: recentchange_quarantine
 # =============================================================================
 @dlt.table(
-    name="recentchange_quarantine",
+    name="silver_recentchange_quarantine",
     comment=(
         "Rows excluded from silver.recentchange_enwiki: bot edits, non-enwiki "
         "wikis, non-edit/new event types (log, categorize, …), and parse "
@@ -303,42 +298,42 @@ def silver_quarantine():
 # 1. Volume sanity check (Silver should be ~5–15 % of Bronze)
 # ─────────────────────────────────────────────────────────
 # SELECT
-#   (SELECT COUNT(*) FROM wiki_poc.silver.recentchange_enwiki)  AS silver_rows,
-#   (SELECT COUNT(*) FROM wiki_poc.bronze.recentchange)         AS bronze_rows,
-#   (SELECT COUNT(*) FROM wiki_poc.silver.recentchange_quarantine) AS quarantine_rows;
+#   (SELECT COUNT(*) FROM wiki_poc.poc.silver_recentchange_enwiki)     AS silver_rows,
+#   (SELECT COUNT(*) FROM wiki_poc.poc.bronze_recentchange_raw)        AS bronze_rows,
+#   (SELECT COUNT(*) FROM wiki_poc.poc.silver_recentchange_quarantine) AS quarantine_rows;
 #
 # 2. Quarantine breakdown by reason
 # ──────────────────────────────────
 # SELECT quarantine_reason, COUNT(*) AS cnt,
 #        ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 1) AS pct
-# FROM wiki_poc.silver.recentchange_quarantine
+# FROM wiki_poc.poc.silver_recentchange_quarantine
 # GROUP BY quarantine_reason ORDER BY cnt DESC;
 #
 # 3. Filter-correctness check (should return exactly one row: false | enwiki)
 # ──────────────────────────────────────────────────────────────────────────
-# SELECT DISTINCT bot, wiki FROM wiki_poc.silver.recentchange_enwiki;
+# SELECT DISTINCT bot, wiki FROM wiki_poc.poc.silver_recentchange_enwiki;
 #
 # 4. Dedup check (should return 0 rows)
 # ──────────────────────────────────────
 # SELECT event_id, COUNT(*) AS dupes
-# FROM wiki_poc.silver.recentchange_enwiki
+# FROM wiki_poc.poc.silver_recentchange_enwiki
 # GROUP BY event_id HAVING dupes > 1 LIMIT 10;
 #
 # 5. byte_delta distribution
 # ────────────────────────────
 # SELECT
-#   MIN(byte_delta)             AS min_delta,
-#   MAX(byte_delta)             AS max_delta,
-#   ROUND(AVG(byte_delta), 1)   AS avg_delta,
-#   PERCENTILE(byte_delta, 0.5) AS p50_delta,
+#   MIN(byte_delta)              AS min_delta,
+#   MAX(byte_delta)              AS max_delta,
+#   ROUND(AVG(byte_delta), 1)    AS avg_delta,
+#   PERCENTILE(byte_delta, 0.5)  AS p50_delta,
 #   PERCENTILE(byte_delta, 0.95) AS p95_delta,
 #   COUNT_IF(byte_delta IS NULL) AS null_delta_rows   -- expected for new-page events
-# FROM wiki_poc.silver.recentchange_enwiki;
+# FROM wiki_poc.poc.silver_recentchange_enwiki;
 #
 # 6. Top 10 pages by edit count in the last hour
 # ──────────────────────────────────────────────
 # SELECT title, COUNT(*) AS edits, COUNT(DISTINCT user) AS unique_editors
-# FROM wiki_poc.silver.recentchange_enwiki
+# FROM wiki_poc.poc.silver_recentchange_enwiki
 # WHERE event_timestamp >= NOW() - INTERVAL 1 HOUR
 # GROUP BY title ORDER BY edits DESC LIMIT 10;
 #
