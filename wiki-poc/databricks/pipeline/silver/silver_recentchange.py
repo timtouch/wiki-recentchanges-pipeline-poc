@@ -242,7 +242,7 @@ def silver_enwiki():
 @dlt.table(
     name="silver_recentchange_quarantine",
     comment=(
-        "Rows excluded from silver.recentchange_enwiki: bot edits, non-enwiki "
+        "Rows excluded from silver_recentchange_enwiki: bot edits, non-enwiki "
         "wikis, non-edit/new event types (log, categorize, …), and parse "
         "failures.  Expected volume: ~85–95 % of Bronze (most of the all-wikis "
         "firehose is non-enwiki or bot-generated).  Retained for audit, "
@@ -290,57 +290,3 @@ def silver_quarantine():
         )
     )
 
-
-# =============================================================================
-# Validation queries — run in a Databricks SQL cell after ≥ 5 min of pipeline
-# =============================================================================
-#
-# 1. Volume sanity check (Silver should be ~5–15 % of Bronze)
-# ─────────────────────────────────────────────────────────
-# SELECT
-#   (SELECT COUNT(*) FROM wiki_poc.poc.silver_recentchange_enwiki)     AS silver_rows,
-#   (SELECT COUNT(*) FROM wiki_poc.poc.bronze_recentchange_raw)        AS bronze_rows,
-#   (SELECT COUNT(*) FROM wiki_poc.poc.silver_recentchange_quarantine) AS quarantine_rows;
-#
-# 2. Quarantine breakdown by reason
-# ──────────────────────────────────
-# SELECT quarantine_reason, COUNT(*) AS cnt,
-#        ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 1) AS pct
-# FROM wiki_poc.poc.silver_recentchange_quarantine
-# GROUP BY quarantine_reason ORDER BY cnt DESC;
-#
-# 3. Filter-correctness check (should return exactly one row: false | enwiki)
-# ──────────────────────────────────────────────────────────────────────────
-# SELECT DISTINCT bot, wiki FROM wiki_poc.poc.silver_recentchange_enwiki;
-#
-# 4. Dedup check (should return 0 rows)
-# ──────────────────────────────────────
-# SELECT event_id, COUNT(*) AS dupes
-# FROM wiki_poc.poc.silver_recentchange_enwiki
-# GROUP BY event_id HAVING dupes > 1 LIMIT 10;
-#
-# 5. byte_delta distribution
-# ────────────────────────────
-# SELECT
-#   MIN(byte_delta)              AS min_delta,
-#   MAX(byte_delta)              AS max_delta,
-#   ROUND(AVG(byte_delta), 1)    AS avg_delta,
-#   PERCENTILE(byte_delta, 0.5)  AS p50_delta,
-#   PERCENTILE(byte_delta, 0.95) AS p95_delta,
-#   COUNT_IF(byte_delta IS NULL) AS null_delta_rows   -- expected for new-page events
-# FROM wiki_poc.poc.silver_recentchange_enwiki;
-#
-# 6. Top 10 pages by edit count in the last hour
-# ──────────────────────────────────────────────
-# SELECT title, COUNT(*) AS edits, COUNT(DISTINCT user) AS unique_editors
-# FROM wiki_poc.poc.silver_recentchange_enwiki
-# WHERE event_timestamp >= NOW() - INTERVAL 1 HOUR
-# GROUP BY title ORDER BY edits DESC LIMIT 10;
-#
-# 7. DLT expectation failures (run as a DLT event log query)
-# ─────────────────────────────────────────────────────────
-# SELECT details:flow_name, details:expectations
-# FROM event_log('<pipeline_id>')
-# WHERE event_type = 'flow_progress'
-#   AND details:flow_progress:metrics:num_rows_dropped_by_expectations > 0
-# ORDER BY timestamp DESC LIMIT 20;
