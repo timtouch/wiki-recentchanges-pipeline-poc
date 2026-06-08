@@ -28,11 +28,6 @@ variable "raw_s3_bucket" {
   default     = "wiki-raw-poc"
 }
 
-variable "alert_email" {
-  description = "Email address for CloudWatch alarm notifications"
-  type        = string
-}
-
 variable "image_tag" {
   description = "ECR image tag to deploy (e.g. latest or a git SHA)"
   type        = string
@@ -48,7 +43,7 @@ variable "user_agent" {
 variable "raw_retention_days" {
   description = "Days to retain raw JSONL in the landing bucket before expiry. Raw is only needed for replay into Bronze; a few days is ample safety margin."
   type        = number
-  default     = 7
+  default     = 1
 }
 
 # ---------------------------------------------------------------------------
@@ -169,12 +164,6 @@ data "aws_iam_policy_document" "producer_task_policy" {
       "dynamodb:PutItem",
     ]
     resources = [aws_dynamodb_table.checkpoint.arn]
-  }
-
-  # CloudWatch: custom metrics
-  statement {
-    actions   = ["cloudwatch:PutMetricData"]
-    resources = ["*"]
   }
 
   # CloudWatch Logs: allow task to write logs
@@ -309,36 +298,6 @@ resource "aws_ecs_service" "producer" {
     security_groups  = [aws_security_group.producer.id]
     assign_public_ip = true  # needed to reach Wikimedia + AWS APIs from default VPC
   }
-}
-
-# ---------------------------------------------------------------------------
-# CloudWatch alarm: stream stall detection
-# ---------------------------------------------------------------------------
-
-resource "aws_sns_topic" "alerts" {
-  name = "wiki-poc-alerts"
-}
-
-resource "aws_sns_topic_subscription" "email" {
-  topic_arn = aws_sns_topic.alerts.arn
-  protocol  = "email"
-  endpoint  = var.alert_email
-}
-
-resource "aws_cloudwatch_metric_alarm" "stream_stall" {
-  alarm_name          = "wiki-producer-stream-stall"
-  alarm_description   = "No events received from Wikimedia SSE stream for > 5 minutes"
-  namespace           = "WikiProducer"
-  metric_name         = "seconds_since_last_event"
-  statistic           = "Maximum"
-  period              = 60
-  evaluation_periods  = 5        # 5 consecutive 1-min periods = 5 min
-  threshold           = 300
-  comparison_operator = "GreaterThanThreshold"
-  treat_missing_data  = "breaching"  # if the producer is down, alarm fires
-
-  alarm_actions = [aws_sns_topic.alerts.arn]
-  ok_actions    = [aws_sns_topic.alerts.arn]
 }
 
 # ---------------------------------------------------------------------------

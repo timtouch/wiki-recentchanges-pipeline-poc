@@ -25,7 +25,6 @@ S3_PREFIX = os.environ.get("S3_PREFIX", "recentchange")
 DYNAMO_TABLE = os.environ.get("DYNAMO_TABLE", "wiki_producer_checkpoint")
 CHECKPOINT_KEY = os.environ.get("CHECKPOINT_KEY", "recentchange")
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-2")
-CW_NAMESPACE = os.environ.get("CW_NAMESPACE", "WikiProducer")
 
 # Wikimedia's User-Agent policy requires a descriptive UA identifying the client
 # (and ideally a contact). A generic library UA like "python-requests/x.y" is
@@ -38,10 +37,6 @@ USER_AGENT = os.environ.get(
 FLUSH_INTERVAL_SECS = int(os.environ.get("FLUSH_INTERVAL_SECS", "60"))
 FLUSH_SIZE_BYTES = int(os.environ.get("FLUSH_SIZE_BYTES", str(5 * 1024 * 1024)))  # 5 MB
 BACKOFF_CAP_SECS = int(os.environ.get("BACKOFF_CAP_SECS", "30"))
-# How often to publish CloudWatch metrics. One batched PutMetricData call per
-# interval keeps API request volume low (well under the 1M/month free tier).
-# Aligned to 60s to match the stream-stall alarm's 60s period.
-METRIC_INTERVAL_SECS = int(os.environ.get("METRIC_INTERVAL_SECS", "60"))
 
 # ---------------------------------------------------------------------------
 # Logging — structured JSON to stdout so CloudWatch can parse it
@@ -58,7 +53,6 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 s3 = boto3.client("s3", region_name=AWS_REGION)
 dynamo = boto3.resource("dynamodb", region_name=AWS_REGION)
-cw = boto3.client("cloudwatch", region_name=AWS_REGION)
 checkpoint_table = dynamo.Table(DYNAMO_TABLE)
 
 
@@ -132,25 +126,6 @@ def flush_to_s3(buffer: list[str], last_event_id: str) -> int:
 
 
 # ---------------------------------------------------------------------------
-# CloudWatch custom metrics
-# ---------------------------------------------------------------------------
-
-def emit_metrics_batch(metrics: list[dict]) -> None:
-    """Send multiple metrics in a SINGLE PutMetricData request.
-
-    One API call can carry many MetricData entries, so batching keeps request
-    volume far below the CloudWatch free tier. Each dict is
-    {"MetricName": str, "Value": float, "Unit": str}.
-    """
-    if not metrics:
-        return
-    try:
-        cw.put_metric_data(Namespace=CW_NAMESPACE, MetricData=metrics)
-    except Exception as e:
-        log.warning(f"CloudWatch metric emission failed: {e}")
-
-
-# ---------------------------------------------------------------------------
 # Main loop
 # ---------------------------------------------------------------------------
 
@@ -172,18 +147,10 @@ def run() -> None:
             buffer: list[str] = []
             buffer_bytes = 0
             last_flush_time = time.monotonic()
-            last_event_time = time.monotonic()
-            last_emit_time = time.monotonic()
-            events_since_last_emit = 0
-            bytes_since_last_emit = 0
 
             for event in client.events():
                 if not event.data or event.data.strip() == "":
                     continue
-
-                # Track liveness
-                last_event_time = time.monotonic()
-                events_since_last_emit += 1
 
                 # Capture last event ID for checkpointing
                 if event.id:
@@ -196,37 +163,10 @@ def run() -> None:
 
                 # Flush on time or size threshold
                 if (now - last_flush_time) >= FLUSH_INTERVAL_SECS or buffer_bytes >= FLUSH_SIZE_BYTES:
-                    written = flush_to_s3(buffer, last_event_id)
-                    bytes_since_last_emit += written
+                    flush_to_s3(buffer, last_event_id)
                     buffer = []
                     buffer_bytes = 0
                     last_flush_time = time.monotonic()
-
-                # Publish metrics once per METRIC_INTERVAL_SECS in a SINGLE
-                # batched API call. The independent last_emit_time timer ensures
-                # this fires once per interval, NOT on every event.
-                emit_elapsed = now - last_emit_time
-                if emit_elapsed >= METRIC_INTERVAL_SECS:
-                    emit_metrics_batch([
-                        {
-                            "MetricName": "events_received_per_second",
-                            "Value": events_since_last_emit / emit_elapsed,
-                            "Unit": "Count/Second",
-                        },
-                        {
-                            "MetricName": "bytes_written_per_minute",
-                            "Value": bytes_since_last_emit,
-                            "Unit": "Bytes",
-                        },
-                        {
-                            "MetricName": "seconds_since_last_event",
-                            "Value": now - last_event_time,
-                            "Unit": "Seconds",
-                        },
-                    ])
-                    last_emit_time = now
-                    events_since_last_emit = 0
-                    bytes_since_last_emit = 0
 
             # Stream ended cleanly — flush remainder
             if buffer:
