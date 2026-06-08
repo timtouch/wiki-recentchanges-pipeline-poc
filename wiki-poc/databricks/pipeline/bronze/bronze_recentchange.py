@@ -1,7 +1,7 @@
 # Databricks notebook source
 # Bronze Layer — Raw Ingestion via Auto Loader
 # Delta Live Tables pipeline notebook
-# Target table: wiki_poc.bronze.bronze_recentchange_raw
+# Target table: wiki_poc.poc.bronze_recentchange_raw
 
 import dlt
 from pyspark.sql import functions as F

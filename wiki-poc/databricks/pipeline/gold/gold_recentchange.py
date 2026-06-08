@@ -41,7 +41,6 @@ from pyspark.sql import functions as F
     ),
     table_properties={
         "delta.autoOptimize.optimizeWrite": "true",
-        "pipelines.autoOptimize.managed":   "true",
     },
     partition_cols=["window_date"],
 )
@@ -102,7 +101,6 @@ def gold_page_edits_5min():
 #     ),
 #     table_properties={
 #         "delta.autoOptimize.optimizeWrite": "true",
-#         "pipelines.autoOptimize.managed":   "true",
 #     },
 #     partition_cols=["window_date"],
 # )
@@ -133,3 +131,37 @@ def gold_page_edits_5min():
 #     )
 
 
+# =============================================================================
+# Validation queries — run after the pipeline has been up for ~20 min
+# (windows need time to close through the watermark)
+# =============================================================================
+#
+# 1. Confirm windows are landing
+# ──────────────────────────────
+# SELECT window_start, window_end, COUNT(*) AS page_count, SUM(edit_count) AS total_edits
+# FROM wiki_poc.poc.gold_page_edits_5min
+# ORDER BY window_start DESC LIMIT 10;
+#
+# 2. Top 20 pages by edit count in the last hour
+# ────────────────────────────────────────────────
+# SELECT title, SUM(edit_count) AS edits, SUM(unique_editors) AS editors
+# FROM wiki_poc.poc.gold_page_edits_5min
+# WHERE window_start >= NOW() - INTERVAL 1 HOUR
+# GROUP BY title ORDER BY edits DESC LIMIT 20;
+#
+# 3. Cross-layer row count sanity check
+# ──────────────────────────────────────
+# SELECT
+#   (SELECT COUNT(*) FROM wiki_poc.poc.bronze_recentchange_raw)       AS bronze,
+#   (SELECT COUNT(*) FROM wiki_poc.poc.silver_recentchange_enwiki)    AS silver,
+#   (SELECT SUM(edit_count) FROM wiki_poc.poc.gold_page_edits_5min)   AS gold_events;
+# -- gold_events should be close to silver (slight diff from watermark lag)
+#
+# 4. Byte delta distribution across windows
+# ──────────────────────────────────────────
+# SELECT
+#   ROUND(AVG(avg_byte_delta), 1) AS overall_avg_delta,
+#   MAX(max_byte_delta)           AS largest_single_edit,
+#   SUM(total_byte_delta)         AS net_bytes_added
+# FROM wiki_poc.poc.gold_page_edits_5min
+# WHERE window_date = CURRENT_DATE();
