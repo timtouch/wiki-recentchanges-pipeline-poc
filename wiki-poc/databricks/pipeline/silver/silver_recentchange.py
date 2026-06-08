@@ -186,6 +186,7 @@ _PASS = (
     (F.col("bot") == False)
     & (F.col("wiki") == "enwiki")
     & F.col("event_type").isin("edit", "new")
+    & (F.col("namespace") == 0)        # article edits only — User/Talk/Draft go to quarantine
 )
 
 
@@ -195,9 +196,10 @@ _PASS = (
 @dlt.table(
     name="silver_recentchange_enwiki",
     comment=(
-        "Filtered, deduped, conformed stream of human enwiki edits and "
-        "new-page events.  One row per unique event_id (deduplicated within a "
-        "10-minute watermark window).  Expected volume: ~5–15 % of Bronze."
+        "Filtered, deduped, conformed stream of human enwiki article edits and "
+        "new-page events (namespace 0 only).  One row per unique event_id "
+        "(deduplicated within a 10-minute watermark window).  "
+        "Expected volume: ~5–15 % of Bronze."
     ),
     table_properties={
         "delta.enableChangeDataFeed":       "true",   # Gold + future phases read via CDF
@@ -243,9 +245,9 @@ def silver_enwiki():
     name="silver_recentchange_quarantine",
     comment=(
         "Rows excluded from silver_recentchange_enwiki: bot edits, non-enwiki "
-        "wikis, non-edit/new event types (log, categorize, …), and parse "
-        "failures.  Expected volume: ~85–95 % of Bronze (most of the all-wikis "
-        "firehose is non-enwiki or bot-generated).  Retained for audit, "
+        "wikis, non-edit/new event types (log, categorize, …), non-article "
+        "namespaces (User, Talk, Draft, Template, …), and parse failures.  "
+        "Expected volume: ~85–95 % of Bronze.  Retained for audit, "
         "filter-rate monitoring in the Step 12 dashboard, and future multi-wiki "
         "expansion."
     ),
@@ -285,6 +287,10 @@ def silver_quarantine():
                 F.col("event_type").isNull()
                 | (~F.col("event_type").isin("edit", "new")),
                 F.lit("non_edit_type"),
+            )
+            .when(
+                F.col("namespace").isNull() | (F.col("namespace") != 0),
+                F.lit("non_article_namespace"),
             )
             .otherwise(F.lit("unknown")),
         )
