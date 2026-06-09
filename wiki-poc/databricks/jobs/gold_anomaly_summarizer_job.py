@@ -309,3 +309,32 @@ spark.sql(f"""
 
 print(f"Wrote {len(summaries)} summaries and marked their pages summarized.")
 display(summary_df.orderBy(F.col("z_score").desc()))
+
+
+# =============================================================================
+# Validation queries
+# =============================================================================
+#
+# -- Latest summaries with search usage
+# SELECT title, z_score, edit_count, searches_used, summary, generated_at
+# FROM wiki_poc.poc.gold_anomaly_summaries
+# ORDER BY generated_at DESC, z_score DESC
+# LIMIT 20;
+#
+# -- Web search usage rate (cost tracking: $10 / 1,000 searches)
+# SELECT
+#   SUM(searches_used)            AS total_searches,
+#   COUNT(*)                      AS pages_summarized,
+#   ROUND(AVG(searches_used), 2)  AS avg_searches_per_page,
+#   COUNT_IF(searches_used > 0)   AS pages_that_searched
+# FROM wiki_poc.poc.gold_anomaly_summaries
+# WHERE generated_at >= CURRENT_DATE();
+#
+# -- Confirm no pages are stuck unsummarized
+# SELECT COUNT(*) AS stuck
+# FROM wiki_poc.poc.gold_anomaly_flags
+# WHERE summarized = false AND detected_at < NOW() - INTERVAL 1 HOUR;
+#
+# Note: diff-fetch coverage (how often the MediaWiki content pull succeeded) is
+# printed at runtime as "Pulled diff content for N/M page(s)" — it is not stored
+# per row. If it's consistently 0/M, this compute can't reach en.wikipedia.org.
