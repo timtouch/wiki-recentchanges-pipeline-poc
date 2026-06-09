@@ -259,6 +259,21 @@ ORDER BY anomalous_windows DESC, peak_z_score DESC
 LIMIT 15;
 
 
+-- AN-4  Latest breaking-news summaries (Claude-generated)
+-- Widget: Table  |  the headline content view — what's happening right now
+-- ─────────────────────────────────────────────────────────────────────────────
+SELECT
+  title,
+  z_score,
+  edit_count,
+  summary,
+  generated_at
+FROM wiki_poc.poc.gold_anomaly_summaries
+WHERE generated_at >= NOW() - INTERVAL 6 HOURS
+ORDER BY generated_at DESC, z_score DESC
+LIMIT 20;
+
+
 -- =============================================================================
 -- ALERT QUERY — Anomaly detection
 -- =============================================================================
