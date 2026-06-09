@@ -26,7 +26,6 @@
 # it picks up rows where summarized = false and sets it to true when done.
 # =============================================================================
 
-from delta.tables import DeltaTable
 from pyspark.sql import functions as F
 
 CATALOG        = "wiki_poc"
@@ -96,7 +95,7 @@ candidates = (
 # The job runs every 15 minutes but scans the last 60 minutes of Gold, so
 # the same (title, window_start) pair will appear in multiple runs.
 # Only insert rows that haven't been flagged before.
-if DeltaTable.isDeltaTable(spark, ANOMALY_TABLE):
+if spark.catalog.tableExists(ANOMALY_TABLE):
     already_flagged = spark.table(ANOMALY_TABLE).select("title", "window_start")
     new_anomalies = candidates.join(already_flagged, on=["title", "window_start"], how="left_anti")
 else:
