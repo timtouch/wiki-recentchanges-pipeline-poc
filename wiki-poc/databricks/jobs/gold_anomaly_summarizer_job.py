@@ -1,3 +1,12 @@
+# Databricks notebook source
+# MAGIC %pip install anthropic
+
+# COMMAND ----------
+
+dbutils.library.restartPython()
+
+# COMMAND ----------
+
 # =============================================================================
 # gold_anomaly_summarizer_job.py
 # Databricks Workflow Job — NOT a DLT notebook
@@ -16,7 +25,7 @@
 # 1. Anthropic API key stored as a Databricks secret:
 #      databricks secrets create-scope wiki_poc
 #      databricks secrets put-secret wiki_poc anthropic_api_key
-# 2. The anthropic SDK (installed via %pip below).
+# 2. The anthropic SDK (installed via %pip in the first cell above).
 #
 # OUTPUT
 # ─────────────────────────────────────────────────────────────────────────────
@@ -24,12 +33,6 @@
 # Flags in gold_anomaly_flags are marked summarized = true once processed,
 # so each anomaly is summarized exactly once.
 # =============================================================================
-
-# COMMAND ----------
-# MAGIC %pip install anthropic
-# MAGIC dbutils.library.restartPython()
-
-# COMMAND ----------
 
 from datetime import datetime, timezone
 
