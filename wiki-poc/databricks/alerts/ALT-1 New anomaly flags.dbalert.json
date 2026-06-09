@@ -1,0 +1,28 @@
+{
+  "evaluation": {
+    "source": {
+      "name": "new_anomalies",
+      "display": "new_anomalies",
+      "aggregation": "AGGREGATION_UNSPECIFIED"
+    },
+    "comparison_operator": "GREATER_THAN",
+    "threshold": {
+      "value": {
+        "double_value": 0.0
+      }
+    },
+    "empty_result_state": "ERROR",
+    "notification": {}
+  },
+  "query_lines": [
+    "-- =============================================================================",
+    "-- ALERT QUERY — Anomaly detection",
+    "-- =============================================================================",
+    "--",
+    "-- ALT-2  New anomalies in the last 15 minutes",
+    "SELECT COUNT(*) AS new_anomalies",
+    "FROM wiki_poc.poc.gold_anomaly_flags",
+    "WHERE detected_at >= NOW() - INTERVAL 15 MINUTES",
+    "  AND summarized = false;"
+  ]
+}
