@@ -66,7 +66,7 @@ MAX_DIFF_CHARS     = 2500    # cap diff text sent to Claude (token control)
 REV_LIMIT          = 200     # max revisions to enumerate per window
 WIKI_API           = "https://en.wikipedia.org/w/api.php"
 WIKI_REST          = "https://en.wikipedia.org/w/rest.php/v1"
-WIKI_UA            = "wiki-recentchanges-poc/1.0 (contact@example.com)"  # required by Wikimedia
+WIKI_UA            = "wiki-recentchanges-poc/1.0 (chaosbounder@gmail.com)"  # required by Wikimedia
 
 SYSTEM_PROMPT = (
     "You are a news analyst monitoring Wikipedia edit activity. For a page being "
