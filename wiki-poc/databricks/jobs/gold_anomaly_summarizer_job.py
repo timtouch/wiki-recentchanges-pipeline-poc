@@ -10,15 +10,14 @@ dbutils.library.restartPython()
 # =============================================================================
 # gold_anomaly_summarizer_job.py
 # Databricks Workflow Job — NOT a DLT notebook
-# Phase 6: Breaking news summarizer using Claude (Anthropic API)
+# Phase 6: Breaking news summarizer using Claude (Anthropic API) with web search
 #
-# CONTEXT SOURCES (richest to leanest)
+# CONTEXT SOURCES
 # ─────────────────────────────────────────────────────────────────────────────
-# 1. Revision diff — the actual content added/changed on the page during the
-#    anomaly window, pulled from the MediaWiki Revisions + Compare APIs. This is
-#    the primary "what happened" signal: the literal text editors added.
-# 2. Edit summaries (comments) from Silver — why each edit was made.
-# 3. Web search — external news context for genuine real-world events.
+# 1. Edit summaries (comments) from Silver — why each edit was made.
+# 2. Web search — external news context for genuine real-world events. Runs
+#    server-side at Anthropic, so this compute only needs to reach
+#    api.anthropic.com (no open-web egress required).
 #
 # HOW TO DEPLOY
 # ─────────────────────────────────────────────────────────────────────────────
@@ -31,8 +30,6 @@ dbutils.library.restartPython()
 #      databricks secrets put-secret wiki_poc anthropic_api_key
 # 2. anthropic SDK (installed via %pip above).
 # 3. Web search enabled for your org in the Claude Console (Settings → Privacy).
-# 4. Network egress from this compute to en.wikipedia.org for the revision
-#    fetch. If blocked, the job degrades to comments + web search automatically.
 #
 # ONE SUMMARY PER PAGE PER RUN
 # ─────────────────────────────────────────────────────────────────────────────
@@ -41,7 +38,6 @@ dbutils.library.restartPython()
 # to also skip pages summarized within that many minutes.
 # =============================================================================
 
-import requests
 from datetime import datetime, timezone
 
 from anthropic import Anthropic
@@ -62,95 +58,27 @@ MAX_PAGES_PER_RUN  = 20
 MAX_COMMENTS       = 25
 MAX_TOKENS         = 700
 COOLDOWN_MINS      = 0       # 0 = one summary per page per run
-MAX_DIFF_CHARS     = 2500    # cap diff text sent to Claude (token control)
-REV_LIMIT          = 200     # max revisions to enumerate per window
-WIKI_API           = "https://en.wikipedia.org/w/api.php"
-WIKI_REST          = "https://en.wikipedia.org/w/rest.php/v1"
-WIKI_UA            = "wiki-recentchanges-poc/1.0 (chaosbounder@gmail.com)"  # required by Wikimedia
 
 SYSTEM_PROMPT = (
-    "You are a news analyst monitoring Wikipedia edit activity. For a page being "
-    "edited far more than usual, you are given: the actual content added or "
-    "changed on the page during the window, the edit summaries, and edit "
-    "metadata. Explain, concisely and factually, what is driving the surge.\n\n"
-    "Use the added/changed CONTENT as your primary evidence — it is the literal "
-    "text editors wrote. Classify the activity as one of: (a) a real-world event "
-    "or breaking news, (b) an edit war or content dispute, (c) vandalism and "
-    "reverts, or (d) routine maintenance.\n\n"
-    "Use the web search tool ONLY when the content points to a real-world event "
-    "you need to date or corroborate; the content and comments usually suffice. "
-    "Never search for vandalism, edit wars, or maintenance.\n\n"
-    "Write 2-4 sentences. Lead with what is actually happening. Do not speculate "
-    "beyond what the content, comments, and any search results support."
+    "You are a news analyst monitoring Wikipedia edit activity. You are given "
+    "metadata and the edit summaries for a Wikipedia article that is being edited "
+    "far more than usual. Explain, concisely and factually, what is most likely "
+    "driving the surge.\n\n"
+    "Classify the activity as one of: (a) a real-world event or breaking news, "
+    "(b) an edit war or content dispute, (c) vandalism and reverts, or "
+    "(d) routine maintenance.\n\n"
+    "Use the web search tool ONLY when the edits point to a likely real-world "
+    "event and you need current details to explain it; the edit summaries usually "
+    "suffice. Never search for vandalism, edit wars, or routine maintenance.\n\n"
+    "Write 2-4 sentences. Lead with what is actually happening in the real world "
+    "when it's an event; otherwise explain the edit pattern plainly. Do not "
+    "speculate beyond what the edit summaries and any search results support."
 )
 
 WEB_SEARCH_TOOL = {"type": "web_search_20250305", "name": "web_search", "max_uses": 3}
 
 api_key = dbutils.secrets.get(scope="wiki_poc", key="anthropic_api_key")
 client = Anthropic(api_key=api_key)
-
-
-# =============================================================================
-# MediaWiki helpers — list revisions in the window, then diff the boundaries
-# =============================================================================
-def _mw_ts(dt) -> str:
-    """Format a datetime as MediaWiki ISO 8601 (e.g. 2026-06-09T00:35:00Z)."""
-    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def fetch_window_revisions(title, window_start, window_end):
-    """Revisions of `title` within [window_start, window_end], oldest first.
-    Uses API:Revisions. Returns a list of revision dicts (revid, parentid, ...)."""
-    params = {
-        "action": "query",
-        "format": "json",
-        "prop": "revisions",
-        "titles": title,
-        "rvprop": "ids|timestamp|comment|user|flags|size",
-        "rvdir": "newer",                  # oldest first → rvstart < rvend
-        "rvstart": _mw_ts(window_start),
-        "rvend": _mw_ts(window_end),
-        "rvlimit": REV_LIMIT,
-    }
-    try:
-        r = requests.get(WIKI_API, params=params,
-                         headers={"User-Agent": WIKI_UA}, timeout=15)
-        r.raise_for_status()
-        for page in r.json().get("query", {}).get("pages", {}).values():
-            if page.get("revisions"):
-                return page["revisions"]
-    except Exception as e:
-        print(f"  revisions fetch failed for '{title}': {e}")
-    return []
-
-
-def fetch_net_diff(from_rev, to_rev):
-    """Net added/changed text between two revisions via the REST compare endpoint.
-    wikidiff2 inline JSON: type 1 = added line, type 3 = changed line (text = new)."""
-    url = f"{WIKI_REST}/revision/{from_rev}/compare/{to_rev}"
-    try:
-        r = requests.get(url, headers={"User-Agent": WIKI_UA}, timeout=15)
-        r.raise_for_status()
-        segments = r.json().get("diff", [])
-        added = [s.get("text", "") for s in segments if s.get("type") in (1, 3)]
-        text = "\n".join(t for t in added if t).strip()
-        return text[:MAX_DIFF_CHARS] if text else None
-    except Exception as e:
-        print(f"  diff fetch failed ({from_rev}->{to_rev}): {e}")
-    return None
-
-
-def fetch_window_diff(title, window_start, window_end):
-    """Net content added/changed on `title` across the anomaly window, or None."""
-    revs = fetch_window_revisions(title, window_start, window_end)
-    if not revs:
-        return None
-    oldest, newest = revs[0], revs[-1]
-    from_rev = oldest.get("parentid") or oldest.get("revid")  # pre-window state
-    to_rev = newest.get("revid")                              # post-window state
-    if not from_rev or not to_rev or from_rev == to_rev:
-        return None
-    return fetch_net_diff(from_rev, to_rev)
 
 
 # =============================================================================
@@ -188,20 +116,15 @@ print(f"Summarizing {len(flags)} anomalous page(s)...")
 
 
 # =============================================================================
-# Step 2 — Gather diff + comments, then call Claude
+# Step 2 — Gather edit comments, then call Claude (with web search)
 # =============================================================================
-def build_prompt(flag, comments_text, diff_text):
-    if diff_text:
-        content_block = f"Content added/changed on the page this window:\n{diff_text}\n\n"
-    else:
-        content_block = "(page content changes could not be retrieved)\n\n"
+def build_prompt(flag, comments_text):
     return (
         f"Page: {flag['title']}\n"
         f"Edits in this 5-minute window: {flag['edit_count']} "
         f"(typical average: {flag['baseline_mean']}, z-score: {flag['z_score']})\n"
         f"Unique editors: {flag['unique_editors']}\n"
         f"Net byte change: {flag['total_byte_delta']}\n\n"
-        f"{content_block}"
         f"Edit summaries from this window:\n{comments_text}\n\n"
         f"In 2-3 sentences, explain what is most likely happening on this page "
         f"and why it is being edited so heavily."
@@ -209,7 +132,6 @@ def build_prompt(flag, comments_text, diff_text):
 
 
 summaries = []
-pages_with_diff = 0
 for flag in flags:
     comment_rows = (
         spark.table(SILVER_TABLE)
@@ -229,18 +151,13 @@ for flag in flags:
         for r in comment_rows if r["comment"]
     ) or "(no edit summaries were provided for these edits)"
 
-    diff_text = fetch_window_diff(flag["title"], flag["window_start"], flag["window_end"])
-    if diff_text:
-        pages_with_diff += 1
-
     try:
         response = client.messages.create(
             model=MODEL,
             max_tokens=MAX_TOKENS,
             system=SYSTEM_PROMPT,
             tools=[WEB_SEARCH_TOOL],
-            messages=[{"role": "user",
-                       "content": build_prompt(flag, comments_text, diff_text)}],
+            messages=[{"role": "user", "content": build_prompt(flag, comments_text)}],
         )
         summary_text = "".join(
             b.text for b in response.content if b.type == "text"
@@ -266,8 +183,6 @@ for flag in flags:
         "model_used":    MODEL,
         "generated_at":  datetime.now(timezone.utc),
     })
-
-print(f"Pulled diff content for {pages_with_diff}/{len(flags)} page(s).")
 
 if not summaries:
     print("No summaries produced (all Claude calls failed or returned empty).")
@@ -334,7 +249,3 @@ display(summary_df.orderBy(F.col("z_score").desc()))
 # SELECT COUNT(*) AS stuck
 # FROM wiki_poc.poc.gold_anomaly_flags
 # WHERE summarized = false AND detected_at < NOW() - INTERVAL 1 HOUR;
-#
-# Note: diff-fetch coverage (how often the MediaWiki content pull succeeded) is
-# printed at runtime as "Pulled diff content for N/M page(s)" — it is not stored
-# per row. If it's consistently 0/M, this compute can't reach en.wikipedia.org.
